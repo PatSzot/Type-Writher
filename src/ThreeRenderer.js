@@ -19,31 +19,29 @@ const VERTEX_SHADER = /* glsl */`
 
     if (uMode < 0.5) {
       // Wave: smooth sine driven left-right
-      float tiltedX = uv.x + uv.y * 0.1763;  // tan(10°) tilt
+      float tiltedX = uv.x + uv.y * 0.1763;
       float phase   = tiltedX * uFrequency * PI * 2.0 - uTime * uSpeed * PI * 2.0;
       float wave    = sin(phase);
       pos.z += wave * uHeight * 1.6;
       pos.y += wave * uHeight * 0.45;
-    }
-
-    if (uMode > 1.5 && uMode < 2.5) {
-      // Polygon: two triangle waves (vertical + horizontal) multiplied → fractal grid
-      float tiltedY = uv.y + uv.x * 0.1763;
-      float tiltedX = uv.x + uv.y * 0.1763;
-      float phaseY  = tiltedY * uFrequency * PI * 2.0 - uTime * uSpeed * PI * 2.0;
-      float phaseX  = tiltedX * uFrequency * PI * 2.0 - uTime * uSpeed * PI * 2.0 * 0.71;
-      float waveY   = abs(mod(phaseY / PI, 2.0) - 1.0) * 2.0 - 1.0;
-      float waveX   = abs(mod(phaseX / PI, 2.0) - 1.0) * 2.0 - 1.0;
-      float wave    = waveY * waveX;
-      pos.z += wave * uHeight * 1.6;
-      pos.y += wave * uHeight * 0.45;
-    }
-
-    if (uMode > 2.5) {
-      // Lens: spherical dome — center bulges toward viewer
-      float dist = length(uv - 0.5) * 2.0;  // 0 at center, 1 at edge
-      float dome = max(0.0, 1.0 - dist * dist);
-      pos.z += dome * uHeight * 1.5;
+    } else {
+      if (uMode < 2.5) {
+        // Polygon: two triangle waves multiplied → fractal grid
+        float tiltedY = uv.y + uv.x * 0.1763;
+        float tiltedX = uv.x + uv.y * 0.1763;
+        float phaseY  = tiltedY * uFrequency * PI * 2.0 - uTime * uSpeed * PI * 2.0;
+        float phaseX  = tiltedX * uFrequency * PI * 2.0 - uTime * uSpeed * PI * 2.0 * 0.71;
+        float waveY   = abs(mod(phaseY / PI, 2.0) - 1.0) * 2.0 - 1.0;
+        float waveX   = abs(mod(phaseX / PI, 2.0) - 1.0) * 2.0 - 1.0;
+        float wave    = waveY * waveX;
+        pos.z += wave * uHeight * 1.6;
+        pos.y += wave * uHeight * 0.45;
+      } else {
+        // Lens: spherical dome — center bulges toward viewer
+        float dist = length(uv - 0.5) * 2.0;
+        float dome = max(0.0, 1.0 - dist * dist);
+        pos.z += dome * uHeight * 1.5;
+      }
     }
 
     gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
@@ -73,48 +71,39 @@ const FRAGMENT_SHADER = /* glsl */`
         dispY * uWarpAmount * 0.0002
       ), 0.0, 1.0);
       gl_FragColor = texture2D(uTexture, distortedUV);
-      return;
-    }
+    } else {
+      if (uMode < 2.5) {
+        // ── Polygon: dual-axis triangle warp ──────────────────────────────────
+        float tiltedY = vUv.y + vUv.x * 0.1763;
+        float tiltedX = vUv.x + vUv.y * 0.1763;
+        float phaseY  = tiltedY * uFrequency * PI * 2.0 - uTime * uSpeed * PI * 2.0;
+        float phaseX  = tiltedX * uFrequency * PI * 2.0 - uTime * uSpeed * PI * 2.0 * 0.71;
+        float waveY   = abs(mod(phaseY / PI, 2.0) - 1.0) * 2.0 - 1.0;
+        float waveX   = abs(mod(phaseX / PI, 2.0) - 1.0) * 2.0 - 1.0;
+        vec2 distortedUV = clamp(vUv + vec2(
+          waveX * uWarpAmount * 0.002,
+          waveY * uWarpAmount * 0.002
+        ), 0.0, 1.0);
+        gl_FragColor = texture2D(uTexture, distortedUV);
+      } else {
+        // ── Lens: differential rotation + barrel distortion ───────────────────
+        vec2  dc    = vUv - 0.5;
+        float r     = length(dc);
+        float theta = atan(dc.y, dc.x);
 
-    if (uMode > 1.5 && uMode < 2.5) {
-      // ── Polygon: dual-axis triangle warp ──────────────────────────────────
-      float tiltedY = vUv.y + vUv.x * 0.1763;
-      float tiltedX = vUv.x + vUv.y * 0.1763;
-      float phaseY  = tiltedY * uFrequency * PI * 2.0 - uTime * uSpeed * PI * 2.0;
-      float phaseX  = tiltedX * uFrequency * PI * 2.0 - uTime * uSpeed * PI * 2.0 * 0.71;
-      float waveY   = abs(mod(phaseY / PI, 2.0) - 1.0) * 2.0 - 1.0;
-      float waveX   = abs(mod(phaseX / PI, 2.0) - 1.0) * 2.0 - 1.0;
-      vec2 distortedUV = clamp(vUv + vec2(
-        waveX * uWarpAmount * 0.002,
-        waveY * uWarpAmount * 0.002
-      ), 0.0, 1.0);
-      gl_FragColor = texture2D(uTexture, distortedUV);
-      return;
-    }
+        // Differential rotation: inner rings spin faster (1/r falloff)
+        float omega        = uSpeed * 0.4 / max(r, 0.04);
+        float rotatedTheta = theta + omega * uTime;
 
-    if (uMode > 2.5) {
-      // ── Lens: differential rotation + barrel distortion ───────────────────
-      // 1. Convert to polar around center
-      vec2  dc    = vUv - 0.5;
-      float r     = length(dc);
-      float theta = atan(dc.y, dc.x);
+        vec2 rotDC = r * vec2(cos(rotatedTheta), sin(rotatedTheta));
 
-      // 2. Differential rotation: inner rings spin faster than outer (1/r falloff)
-      //    uSpeed = base angular speed at r=0.4; omega scales inversely with r.
-      float omega        = uSpeed * 0.4 / max(r, 0.04);
-      float rotatedTheta = theta + omega * uTime;
+        // Barrel distortion: outer edges bow outward
+        float k      = uWarpAmount * 0.008;
+        vec2  lensDC = rotDC * (1.0 + k * r * r);
 
-      // 3. Reconstruct rotated UV offset
-      vec2 rotDC = r * vec2(cos(rotatedTheta), sin(rotatedTheta));
-
-      // 4. Barrel distortion (magnifying glass): outer edges bow outward.
-      //    uWarpAmount 0-100 maps to 0-0.8 distortion coefficient.
-      float k       = uWarpAmount * 0.008;
-      vec2  lensDC  = rotDC * (1.0 + k * r * r);
-
-      vec2 finalUV = clamp(0.5 + lensDC, 0.0, 1.0);
-      gl_FragColor = texture2D(uTexture, finalUV);
-      return;
+        vec2 finalUV = clamp(0.5 + lensDC, 0.0, 1.0);
+        gl_FragColor = texture2D(uTexture, finalUV);
+      }
     }
   }
 `
@@ -212,7 +201,6 @@ export class ThreeRenderer {
       vertexShader:   VERTEX_SHADER,
       fragmentShader: FRAGMENT_SHADER,
       side:           THREE.DoubleSide,
-      transparent:    true,
     })
 
     this.mesh = new THREE.Mesh(geo, mat)
@@ -224,6 +212,7 @@ export class ThreeRenderer {
     this.ringsPoints.visible = false
     this.scene.add(this.ringsPoints)
 
+    this._bgColor     = '#000000'
     this._baseRotX    = -0.22
     this._ptr         = { x: 0, y: 0 }
     this._rotStrength = 10
@@ -286,39 +275,39 @@ export class ThreeRenderer {
   }
 
   // ── Ring text canvas (lens mode) ───────────────────────────────────────
-  // Draws the phrase as concentric circles of characters on a square canvas.
-  // The shader handles all animation (differential rotation + lens distortion).
+  // Phrase characters arranged in 15 concentric circles, tangent-aligned.
+  // All animation (differential rotation + lens distortion) is in the shader.
 
   _drawRingTextNow() {
     const W = TEXT_W
 
-    // Ensure square canvas and matching plane geometry
+    // Ensure square canvas — ring text lives in a 1:1 aspect texture
     if (this.textCanvas.height !== W) {
       this.textCanvas.height = W
-      this.texture.image = this.textCanvas
+      this.texture.image     = this.textCanvas
       this.mesh.geometry.dispose()
-      this.mesh.geometry = new THREE.PlaneGeometry(PLANE_W, PLANE_W, SEGS_X, SEGS_X)
+      // Use fewer segments for lens — distortion is purely per-fragment
+      this.mesh.geometry = new THREE.PlaneGeometry(PLANE_W, PLANE_W, 120, 120)
     }
 
     const canvas = this.textCanvas
     const ctx    = canvas.getContext('2d')
-    const cx = W / 2, cy = W / 2
+    const cx = W / 2
+    const cy = W / 2
 
     ctx.clearRect(0, 0, W, W)
-    if (this._bgColor) {
-      ctx.fillStyle = this._bgColor
-      ctx.fillRect(0, 0, W, W)
-    }
+    ctx.fillStyle = this._bgColor || '#000000'
+    ctx.fillRect(0, 0, W, W)
 
     const phrase = this._ringPhrase || ''
     const chars  = [...phrase.trim()]
     if (!chars.length) { this.texture.needsUpdate = true; return }
 
-    const fSize  = (this._ringFontSize  || 37) * 1.5
-    const numRings  = 15
-    const minR      = W * 0.08
-    const maxR      = W * 0.48
-    const charGap   = fSize * 0.65   // approximate character advance
+    const fSize    = Math.max(20, (this._ringFontSize || 37) * 1.4)
+    const numRings = 15
+    const minR     = W * 0.08
+    const maxR     = W * 0.47
+    const charGap  = fSize * 0.7
 
     ctx.font         = `400 ${fSize}px ${this._ringFontFamily || 'serif'}`
     ctx.fillStyle    = this._ringTextColor || '#ffffff'
@@ -329,22 +318,24 @@ export class ThreeRenderer {
     ctx.translate(cx, cy)
 
     for (let ring = 0; ring < numRings; ring++) {
-      const r             = minR + (maxR - minR) * (ring / (numRings - 1))
+      const r            = minR + (maxR - minR) * (ring / (numRings - 1))
       const circumference = 2 * Math.PI * r
-      const numChars      = Math.max(4, Math.floor(circumference / charGap))
-      const angleStep     = (2 * Math.PI) / numChars
-      // Stagger each ring's start angle so characters don't line up radially
-      const startAngle    = (ring / numRings) * (Math.PI / 4)
+      const numChars     = Math.max(4, Math.floor(circumference / charGap))
+      const angleStep    = (2 * Math.PI) / numChars
+      // Stagger each ring so characters don't align radially
+      const startAngle   = (ring / numRings) * Math.PI * 0.5
 
       for (let i = 0; i < numChars; i++) {
         const char  = chars[i % chars.length]
         const angle = startAngle + i * angleStep
-        const x     = r * Math.cos(angle - Math.PI / 2)   // top = 0°
-        const y     = r * Math.sin(angle - Math.PI / 2)
+        // Position on ring (starting from top, going clockwise)
+        const x = r * Math.cos(angle - Math.PI / 2)
+        const y = r * Math.sin(angle - Math.PI / 2)
 
         ctx.save()
         ctx.translate(x, y)
-        ctx.rotate(angle)   // tangent direction
+        // Tangent rotation: angle itself (from top) + 90° = along ring direction
+        ctx.rotate(angle + Math.PI / 2)
         ctx.fillText(char, 0, 0)
         ctx.restore()
       }
@@ -379,12 +370,12 @@ export class ThreeRenderer {
   // ── Text rendering ─────────────────────────────────────────────────────
 
   drawText({ phrase, fontFamily, fontSize, leading, tracking, textColor, textWidth = 90, textAlign = 'center' }) {
-    // In lens mode: store settings and draw static ring layout; shader handles animation
+    // Lens mode: store settings and draw static ring layout; shader handles animation
     if (this._currentEffect === 'lens') {
-      this._ringPhrase      = phrase
-      this._ringFontFamily  = fontFamily
-      this._ringFontSize    = fontSize
-      this._ringTextColor   = textColor
+      this._ringPhrase     = phrase
+      this._ringFontFamily = fontFamily
+      this._ringFontSize   = fontSize
+      this._ringTextColor  = textColor
       this._drawRingTextNow()
       return
     }
@@ -529,8 +520,8 @@ export class ThreeRenderer {
   }
 
   // ── Lens params ────────────────────────────────────────────────────────
-  // Reuses existing uniforms: uSpeed = spin speed, uWarpAmount = distortion,
-  // uHeight = dome displacement height.
+  // Reuses uniforms: uSpeed = spin speed, uWarpAmount = distortion strength,
+  // uHeight = dome height.
 
   setLensParams({ speed, distortion, dome }) {
     this.uniforms.uSpeed.value      = speed

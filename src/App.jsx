@@ -174,9 +174,14 @@ export default function App() {
   }, [wave])
 
   // ── Switch effect mode + background color ─────────────────────────────
+  // Also re-apply the relevant params — each effect reuses uniforms differently,
+  // so switching modes without resetting them causes wrong values to bleed over.
   useEffect(() => {
     rendRef.current?.setEffect(effect)
     rendRef.current?.setBgColor(EFFECT_BG[effect] ?? '#000000')
+    if (effect === 'lens')   rendRef.current?.setLensParams(lens)
+    else if (effect === 'rings') rendRef.current?.setRingsParams(rings)
+    else                    rendRef.current?.setWaveParams(wave)
   }, [effect])
 
   // ── Rotation strength ──────────────────────────────────────────────────

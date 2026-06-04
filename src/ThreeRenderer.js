@@ -532,48 +532,67 @@ export class ThreeRenderer {
   }
 
   // ── Transparent frame capture (for SVG export) ─────────────────────────
-  // Re-renders the scene with no background, then returns a PNG data URL.
-  // For plane-based effects (wave/polygon/lens): re-draws the text canvas
-  // without the bg fill and enables material transparency so the text
-  // floats on a transparent framebuffer.
-  // For rings: the Points geometry already has per-dot colors; just clearing
-  // to transparent is enough.
+  // Re-renders the scene with no background, reads raw pixels via
+  // gl.readPixels() (bypasses browser toDataURL JPEG fallback and MSAA
+  // alpha issues), flips vertically (WebGL origin = bottom-left), writes
+  // to an offscreen 2D canvas, and returns a PNG data URL.
 
   exportTransparentFrame() {
     const savedBg = this._bgColor
 
-    if (this._currentEffect !== 'rings') {
-      // Step 1: Re-draw canvas with no background
-      this._bgColor = null
-      if (this._currentEffect === 'lens') {
-        this._drawRingTextNow()
-      } else if (this._lastDrawParams) {
-        this._drawCanvasText(this._lastDrawParams)
-      }
-
-      // Step 2: Enable plane material transparency so canvas alpha is respected
-      this.planeMat.transparent = true
-      this.planeMat.needsUpdate  = true
+    // Re-draw texture without background fill
+    this._bgColor = null
+    if (this._currentEffect === 'lens') {
+      this._drawRingTextNow()
+    } else if (this._currentEffect !== 'rings' && this._lastDrawParams) {
+      this._drawCanvasText(this._lastDrawParams)
     }
 
-    // Step 3: Render with fully transparent clear
+    // Enable transparency on plane so canvas alpha is blended correctly
+    if (this._currentEffect !== 'rings') {
+      this.planeMat.transparent = true
+      this.planeMat.depthWrite  = false
+      this.planeMat.needsUpdate = true
+    }
+
+    // Render with fully transparent clear
     this.renderer.setClearColor(0x000000, 0)
     this.renderer.render(this.scene, this.camera)
-    const dataURL = this.renderer.domElement.toDataURL('image/png')
 
-    // Step 4: Restore everything
+    // Read raw RGBA pixels directly from the WebGL framebuffer.
+    // This avoids browser-level compositing issues and Safari's JPEG fallback.
+    const gl = this.renderer.getContext()
+    const w  = this.renderer.domElement.width
+    const h  = this.renderer.domElement.height
+    const buf = new Uint8Array(w * h * 4)
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf)
+
+    // WebGL Y-axis is flipped relative to canvas — reverse row order
+    const offscreen = document.createElement('canvas')
+    offscreen.width  = w
+    offscreen.height = h
+    const ctx2d   = offscreen.getContext('2d')
+    const imgData = ctx2d.createImageData(w, h)
+    const stride  = w * 4
+    for (let y = 0; y < h; y++) {
+      imgData.data.set(buf.subarray((h - 1 - y) * stride, (h - y) * stride), y * stride)
+    }
+    ctx2d.putImageData(imgData, 0, 0)
+    const dataURL = offscreen.toDataURL('image/png')
+
+    // Restore all state
     this._bgColor = savedBg
     if (this._currentEffect !== 'rings') {
       this.planeMat.transparent = false
-      this.planeMat.needsUpdate  = true
-
-      if (this._currentEffect === 'lens') {
-        this._drawRingTextNow()
-      } else if (this._lastDrawParams) {
-        this._drawCanvasText(this._lastDrawParams)
-      }
+      this.planeMat.depthWrite  = true
+      this.planeMat.needsUpdate = true
     }
     if (savedBg) this.renderer.setClearColor(new THREE.Color(savedBg), 1)
+    if (this._currentEffect === 'lens') {
+      this._drawRingTextNow()
+    } else if (this._currentEffect !== 'rings' && this._lastDrawParams) {
+      this._drawCanvasText(this._lastDrawParams)
+    }
     this.renderer.render(this.scene, this.camera)
 
     return dataURL

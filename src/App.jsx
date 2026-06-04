@@ -282,6 +282,28 @@ export default function App() {
     setExportPhase('')
   }
 
+  const handleExportSVG = () => {
+    const pngDataURL = rendRef.current?.exportTransparentFrame()
+    if (!pngDataURL) return
+    const el = rendRef.current?.domElement
+    const w  = el.width
+    const h  = el.height
+    const svg = [
+      `<?xml version="1.0" encoding="UTF-8"?>`,
+      `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"`,
+      `     width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`,
+      `  <image href="${pngDataURL}" width="${w}" height="${h}"/>`,
+      `</svg>`,
+    ].join('\n')
+    const blob = new Blob([svg], { type: 'image/svg+xml' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = 'typewrither-nobg.svg'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   const handleExportLottie = () => {
     const positions = rendRef.current?.charPositions
     if (!positions?.length) return
@@ -519,6 +541,10 @@ export default function App() {
             <button className="export-btn" onClick={handleExportLottie}>
               Export Lottie
               <small>3s · JSON · per-char wave</small>
+            </button>
+            <button className="export-btn" onClick={handleExportSVG}>
+              Export SVG
+              <small>current frame · no background</small>
             </button>
           </div>
         </div>

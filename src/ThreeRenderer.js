@@ -91,13 +91,11 @@ const FRAGMENT_SHADER = /* glsl */`
         float r     = length(dc);
         float theta = atan(dc.y, dc.x);
 
-        // Differential rotation: inner rings spin faster (1/r falloff)
         float omega        = uSpeed * 0.4 / max(r, 0.04);
         float rotatedTheta = theta + omega * uTime;
 
         vec2 rotDC = r * vec2(cos(rotatedTheta), sin(rotatedTheta));
 
-        // Barrel distortion: outer edges bow outward
         float k      = uWarpAmount * 0.008;
         vec2  lensDC = rotDC * (1.0 + k * r * r);
 
@@ -165,7 +163,8 @@ export class ThreeRenderer {
     const w = this.mount.clientWidth
     const h = this.mount.clientHeight
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true })
+    // alpha: true enables transparent clear for the SVG export path
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, alpha: true })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.setSize(w, h)
     this.renderer.setClearColor(0x000000, 1)
@@ -196,14 +195,15 @@ export class ThreeRenderer {
       uMode:       { value: 0.0 },
     }
 
-    const mat = new THREE.ShaderMaterial({
+    this.planeMat = new THREE.ShaderMaterial({
       uniforms:       this.uniforms,
       vertexShader:   VERTEX_SHADER,
       fragmentShader: FRAGMENT_SHADER,
       side:           THREE.DoubleSide,
+      transparent:    false,
     })
 
-    this.mesh = new THREE.Mesh(geo, mat)
+    this.mesh = new THREE.Mesh(geo, this.planeMat)
     this.mesh.rotation.x = -0.22
     this.scene.add(this.mesh)
 
@@ -275,18 +275,14 @@ export class ThreeRenderer {
   }
 
   // ── Ring text canvas (lens mode) ───────────────────────────────────────
-  // Phrase characters arranged in 15 concentric circles, tangent-aligned.
-  // All animation (differential rotation + lens distortion) is in the shader.
 
   _drawRingTextNow() {
     const W = TEXT_W
 
-    // Ensure square canvas — ring text lives in a 1:1 aspect texture
     if (this.textCanvas.height !== W) {
       this.textCanvas.height = W
       this.texture.image     = this.textCanvas
       this.mesh.geometry.dispose()
-      // Use fewer segments for lens — distortion is purely per-fragment
       this.mesh.geometry = new THREE.PlaneGeometry(PLANE_W, PLANE_W, 120, 120)
     }
 
@@ -296,8 +292,10 @@ export class ThreeRenderer {
     const cy = W / 2
 
     ctx.clearRect(0, 0, W, W)
-    ctx.fillStyle = this._bgColor || '#000000'
-    ctx.fillRect(0, 0, W, W)
+    if (this._bgColor) {
+      ctx.fillStyle = this._bgColor
+      ctx.fillRect(0, 0, W, W)
+    }
 
     const phrase = this._ringPhrase || ''
     const chars  = [...phrase.trim()]
@@ -322,19 +320,16 @@ export class ThreeRenderer {
       const circumference = 2 * Math.PI * r
       const numChars     = Math.max(4, Math.floor(circumference / charGap))
       const angleStep    = (2 * Math.PI) / numChars
-      // Stagger each ring so characters don't align radially
       const startAngle   = (ring / numRings) * Math.PI * 0.5
 
       for (let i = 0; i < numChars; i++) {
         const char  = chars[i % chars.length]
         const angle = startAngle + i * angleStep
-        // Position on ring (starting from top, going clockwise)
         const x = r * Math.cos(angle - Math.PI / 2)
         const y = r * Math.sin(angle - Math.PI / 2)
 
         ctx.save()
         ctx.translate(x, y)
-        // Tangent rotation: angle itself (from top) + 90° = along ring direction
         ctx.rotate(angle + Math.PI / 2)
         ctx.fillText(char, 0, 0)
         ctx.restore()
@@ -367,19 +362,11 @@ export class ThreeRenderer {
     return true
   }
 
-  // ── Text rendering ─────────────────────────────────────────────────────
+  // ── Internal canvas text drawing (wave / polygon) ──────────────────────
+  // Separated from drawText so it can be called with a temporary _bgColor
+  // during transparent SVG export.
 
-  drawText({ phrase, fontFamily, fontSize, leading, tracking, textColor, textWidth = 90, textAlign = 'center' }) {
-    // Lens mode: store settings and draw static ring layout; shader handles animation
-    if (this._currentEffect === 'lens') {
-      this._ringPhrase     = phrase
-      this._ringFontFamily = fontFamily
-      this._ringFontSize   = fontSize
-      this._ringTextColor  = textColor
-      this._drawRingTextNow()
-      return
-    }
-
+  _drawCanvasText({ phrase, fontFamily, fontSize, leading, tracking, textColor, textWidth = 90, textAlign = 'center' }) {
     const canvas = this.textCanvas
     const ctx    = canvas.getContext('2d')
     const cw     = TEXT_W
@@ -454,6 +441,23 @@ export class ThreeRenderer {
     this.texture.needsUpdate = true
   }
 
+  // ── Text rendering ─────────────────────────────────────────────────────
+
+  drawText(params) {
+    this._lastDrawParams = params   // stored for transparent SVG export
+
+    if (this._currentEffect === 'lens') {
+      this._ringPhrase     = params.phrase
+      this._ringFontFamily = params.fontFamily
+      this._ringFontSize   = params.fontSize
+      this._ringTextColor  = params.textColor
+      this._drawRingTextNow()
+      return
+    }
+
+    this._drawCanvasText(params)
+  }
+
   _wrapWords(ctx, text, maxPx, trkPx) {
     const words = text.split(' ')
     const lines = []
@@ -520,13 +524,59 @@ export class ThreeRenderer {
   }
 
   // ── Lens params ────────────────────────────────────────────────────────
-  // Reuses uniforms: uSpeed = spin speed, uWarpAmount = distortion strength,
-  // uHeight = dome height.
 
   setLensParams({ speed, distortion, dome }) {
     this.uniforms.uSpeed.value      = speed
     this.uniforms.uWarpAmount.value = distortion
     this.uniforms.uHeight.value     = (dome / 100) * 2.5
+  }
+
+  // ── Transparent frame capture (for SVG export) ─────────────────────────
+  // Re-renders the scene with no background, then returns a PNG data URL.
+  // For plane-based effects (wave/polygon/lens): re-draws the text canvas
+  // without the bg fill and enables material transparency so the text
+  // floats on a transparent framebuffer.
+  // For rings: the Points geometry already has per-dot colors; just clearing
+  // to transparent is enough.
+
+  exportTransparentFrame() {
+    const savedBg = this._bgColor
+
+    if (this._currentEffect !== 'rings') {
+      // Step 1: Re-draw canvas with no background
+      this._bgColor = null
+      if (this._currentEffect === 'lens') {
+        this._drawRingTextNow()
+      } else if (this._lastDrawParams) {
+        this._drawCanvasText(this._lastDrawParams)
+      }
+
+      // Step 2: Enable plane material transparency so canvas alpha is respected
+      this.planeMat.transparent = true
+      this.planeMat.needsUpdate  = true
+    }
+
+    // Step 3: Render with fully transparent clear
+    this.renderer.setClearColor(0x000000, 0)
+    this.renderer.render(this.scene, this.camera)
+    const dataURL = this.renderer.domElement.toDataURL('image/png')
+
+    // Step 4: Restore everything
+    this._bgColor = savedBg
+    if (this._currentEffect !== 'rings') {
+      this.planeMat.transparent = false
+      this.planeMat.needsUpdate  = true
+
+      if (this._currentEffect === 'lens') {
+        this._drawRingTextNow()
+      } else if (this._lastDrawParams) {
+        this._drawCanvasText(this._lastDrawParams)
+      }
+    }
+    if (savedBg) this.renderer.setClearColor(new THREE.Color(savedBg), 1)
+    this.renderer.render(this.scene, this.camera)
+
+    return dataURL
   }
 
   // ── Loop / resize / export ─────────────────────────────────────────────
@@ -557,7 +607,7 @@ export class ThreeRenderer {
 
   dispose() {
     this.mesh.geometry.dispose()
-    this.mesh.material.dispose()
+    this.planeMat.dispose()
     this.ringsPoints.geometry.dispose()
     this.ringsPoints.material.dispose()
     this.texture.dispose()
